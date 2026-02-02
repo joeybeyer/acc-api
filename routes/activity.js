@@ -1,0 +1,113 @@
+/**
+ * Activity feed routes — scoped by user_id with plan-based date limits.
+ */
+const { Router } = require('express');
+const { getDb } = require('../db');
+const { planGate, getEffectivePlan, PLAN_LIMITS } = require('../middleware/planGate');
+
+const router = Router();
+
+// ── Helper ──────────────────────────────────────────
+
+function scopeWhere(req, alias = '') {
+  const prefix = alias ? `${alias}.` : '';
+  if (req.user.is_admin && req.query.scope === 'all') {
+    return { clause: '1=1', params: [] };
+  }
+  return { clause: `${prefix}user_id = ?`, params: [req.user.id] };
+}
+
+// ── GET /activity ───────────────────────────────────
+
+router.get('/', (req, res) => {
+  try {
+    const db = getDb();
+    const { limit = 20, task_id } = req.query;
+    const { clause, params } = scopeWhere(req, 'a');
+
+    // Get user's effective plan for activity feed limits
+    const effectivePlan = req.user.is_admin ? 'agency' : getEffectivePlan(req.user);
+    const planLimits = PLAN_LIMITS[effectivePlan] || PLAN_LIMITS.free;
+
+    let query = `
+      SELECT a.*, t.title as task_title, t.tags as task_tags
+      FROM activity_log a
+      LEFT JOIN tasks t ON a.task_id = t.id
+      WHERE ${clause}
+    `;
+
+    // Add date filter based on plan
+    if (planLimits.activity_feed_days && !req.user.is_admin) {
+      query += ` AND a.timestamp >= datetime('now', '-${planLimits.activity_feed_days} days')`;
+    }
+
+    if (task_id) {
+      query += ' AND a.task_id = ?';
+      params.push(task_id);
+    }
+
+    query += ' ORDER BY a.timestamp DESC LIMIT ?';
+    params.push(parseInt(limit));
+
+    const activities = db.prepare(query).all(...params);
+
+    res.json(
+      activities.map(a => ({
+        ...a,
+        task_tags: (() => { try { return JSON.parse(a.task_tags || '[]'); } catch { return typeof a.task_tags === 'string' ? a.task_tags.split(',').map(t => t.trim()) : []; } })(),
+        metadata: (() => { try { return JSON.parse(a.metadata || '{}'); } catch { return {}; } })(),
+      }))
+    );
+  } catch (err) {
+    console.error('Activity feed error:', err);
+    res.status(500).json({ error: 'Failed to fetch activity' });
+  }
+});
+
+// ── POST /activity ──────────────────────────────────
+
+router.post('/', planGate('write'), (req, res) => {
+  try {
+    const db = getDb();
+    const { task_id, action, message, metadata } = req.body;
+
+    if (!action || !message) {
+      return res.status(400).json({
+        error: 'ValidationError',
+        message: 'Action and message are required',
+      });
+    }
+
+    // If task_id provided, verify ownership
+    if (task_id) {
+      const task = db.prepare(
+        'SELECT id FROM tasks WHERE id = ? AND user_id = ?'
+      ).get(task_id, req.user.id);
+
+      if (!task && !req.user.is_admin) {
+        return res.status(404).json({ error: 'Task not found' });
+      }
+    }
+
+    const result = db.prepare(`
+      INSERT INTO activity_log (user_id, task_id, action, message, metadata)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(
+      req.user.id,
+      task_id || null,
+      action,
+      message,
+      JSON.stringify(metadata || {}),
+    );
+
+    res.status(201).json({
+      id: result.lastInsertRowid,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('Log activity error:', err);
+    res.status(500).json({ error: 'Failed to log activity' });
+  }
+});
+
+module.exports = router;

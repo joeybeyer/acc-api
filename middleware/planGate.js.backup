@@ -1,0 +1,149 @@
+/**
+ * Feature-gating middleware.
+ *
+ * Enforces plan limits:
+ *   starter  → 100 tasks/month, 1 API key
+ *   pro      → unlimited tasks, 5 API keys, webhooks, team seats
+ *   agency   → unlimited everything, white-label
+ *
+ * Trial users (trial_ends_at in the future) get starter limits.
+ * Expired trials with no subscription → read-only.
+ * Admins bypass all gates.
+ */
+const { getDb } = require('../db');
+
+const PLAN_LIMITS = {
+  starter: { tasks_per_month: 100, api_keys: 1,  webhooks: false, whitelabel: false },
+  pro:     { tasks_per_month: Infinity, api_keys: 5,  webhooks: true,  whitelabel: false },
+  agency:  { tasks_per_month: Infinity, api_keys: 25, webhooks: true,  whitelabel: true },
+};
+
+/**
+ * Check if user's trial/subscription is active.
+ * Returns { active: bool, reason: string }
+ */
+function checkAccess(user) {
+  // Admins always have access
+  if (user.is_admin) return { active: true };
+
+  // Has active Stripe subscription → access granted
+  if (user.stripe_subscription_id) return { active: true };
+
+  // Check trial
+  if (user.trial_ends_at) {
+    const trialEnd = new Date(user.trial_ends_at + 'Z');
+    if (trialEnd > new Date()) {
+      return { active: true, trial: true, expires: user.trial_ends_at };
+    }
+    return {
+      active: false,
+      reason: 'Trial expired. Subscribe to continue creating and updating tasks.',
+    };
+  }
+
+  // No trial, no sub — shouldn't happen, but block writes
+  return { active: false, reason: 'No active subscription.' };
+}
+
+/**
+ * Factory: returns middleware that checks a specific feature/limit.
+ *
+ * Usage:
+ *   router.post('/tasks', planGate('create_task'), handler)
+ *   router.post('/api-keys', planGate('create_api_key'), handler)
+ *   router.use(planGate('write'))  // blocks all writes for expired trials
+ */
+function planGate(feature) {
+  return (req, res, next) => {
+    const user = req.user;
+    if (!user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    // Admins bypass everything
+    if (user.is_admin) return next();
+
+    const access = checkAccess(user);
+    if (!access.active) {
+      return res.status(403).json({
+        error: 'SubscriptionRequired',
+        message: access.reason,
+      });
+    }
+
+    const plan = user.plan || 'starter';
+    const limits = PLAN_LIMITS[plan] || PLAN_LIMITS.starter;
+    const db = getDb();
+
+    switch (feature) {
+      case 'create_task': {
+        // Count tasks created this month
+        const count = db.prepare(`
+          SELECT COUNT(*) as cnt FROM tasks
+          WHERE user_id = ?
+          AND created_at >= datetime('now', 'start of month')
+        `).get(user.id).cnt;
+
+        if (count >= limits.tasks_per_month) {
+          return res.status(403).json({
+            error: 'PlanLimitReached',
+            message: `Your ${plan} plan allows ${limits.tasks_per_month} tasks/month. You've used ${count}.`,
+            current: count,
+            limit: limits.tasks_per_month,
+            upgrade_hint: plan === 'starter' ? 'Upgrade to Pro for unlimited tasks.' : null,
+          });
+        }
+        break;
+      }
+
+      case 'create_api_key': {
+        const count = db.prepare(
+          'SELECT COUNT(*) as cnt FROM api_keys WHERE user_id = ?'
+        ).get(user.id).cnt;
+
+        if (count >= limits.api_keys) {
+          return res.status(403).json({
+            error: 'PlanLimitReached',
+            message: `Your ${plan} plan allows ${limits.api_keys} API key(s). You have ${count}.`,
+            current: count,
+            limit: limits.api_keys,
+          });
+        }
+        break;
+      }
+
+      case 'webhooks': {
+        if (!limits.webhooks) {
+          return res.status(403).json({
+            error: 'PlanLimitReached',
+            message: 'Webhooks require Pro or Agency plan.',
+          });
+        }
+        break;
+      }
+
+      case 'whitelabel': {
+        if (!limits.whitelabel) {
+          return res.status(403).json({
+            error: 'PlanLimitReached',
+            message: 'White-label requires Agency plan.',
+          });
+        }
+        break;
+      }
+
+      // Generic write gate — blocks creates/updates for expired trials
+      case 'write': {
+        // access.active already checked above, so this is fine
+        break;
+      }
+
+      default:
+        break;
+    }
+
+    next();
+  };
+}
+
+module.exports = { planGate, checkAccess, PLAN_LIMITS };
