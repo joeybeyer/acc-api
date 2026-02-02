@@ -1,0 +1,8 @@
+node_modules/
+.env
+db/tasks.db
+db/tasks.db-shm
+db/tasks.db-wal
+*.backup
+*.backup.
+*.bak
