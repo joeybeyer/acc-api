@@ -83,6 +83,9 @@ app.use('/events', require('./routes/events'));
 // Activity feed
 app.use('/activity', require('./routes/activity'));
 
+// Notifications + Health Score (Empire tier)
+app.use('/notifications', require('./routes/notifications'));
+
 // Stats (scoped by user)
 app.get('/stats', (req, res) => {
   try {
