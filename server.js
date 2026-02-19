@@ -55,6 +55,9 @@ app.post(
 
 app.use(express.json({ limit: '1mb' }));
 
+// ── Static assets ───────────────────────────────────
+app.use('/creatives', express.static(path.join(__dirname, 'public', 'creatives')));
+
 // ── Public routes (no auth) ─────────────────────────
 
 // Health check
@@ -70,12 +73,29 @@ app.get('/health', (req, res) => {
 // Auth (signup + login are public; logout + me check auth internally)
 app.use('/auth', require('./routes/auth'));
 
+// Affiliate auth (public login + /me)
+const affiliateAuth = require('./routes/affiliate-auth');
+app.use('/affiliate', affiliateAuth.router);
+
+// Affiliate portal (uses affiliate auth internally)
+app.use('/affiliate', require('./routes/affiliate-portal'));
+
+// Dialer public webhooks / TwiML
+const dialerRoutes = require('./routes/dialer');
+app.use('/dialer', dialerRoutes.public);
+
 // ── Protected routes (auth required) ────────────────
 
 app.use(authenticate);
 
 // Tasks
 app.use('/tasks', require('./routes/tasks'));
+
+// Team management + permissions
+app.use('/users', require('./routes/users'));
+app.use('/permissions', require('./routes/permissions'));
+app.use('/time-tracking', require('./routes/time-tracking'));
+app.use('/va', require('./routes/va'));
 
 // Events (parser + rules engine + lifecycle)
 app.use('/events', require('./routes/events'));
@@ -85,6 +105,18 @@ app.use('/activity', require('./routes/activity'));
 
 // Notifications + Health Score (Empire tier)
 app.use('/notifications', require('./routes/notifications'));
+
+// Creative Loop (AI creatives)
+app.use('/loops', require('./routes/loops'));
+
+// FB Ad Library Scraper
+app.use('/fb-scraper', require('./routes/fb-scraper'));
+
+// Revenue Dashboard
+app.use('/revenue', require('./routes/revenue'));
+
+// Dialer (protected)
+app.use('/dialer', dialerRoutes.protected);
 
 // Stats (scoped by user)
 app.get('/stats', (req, res) => {

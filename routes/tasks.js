@@ -11,8 +11,27 @@ const router = Router();
 
 // ── Helper: build WHERE clause for tenant scoping ───
 
+function getRole(user) {
+  if (!user) return 'manager';
+  if (user.role) return user.role;
+  return user.is_admin ? 'admin' : 'manager';
+}
+
 function scopeWhere(req, alias = '') {
   const prefix = alias ? `${alias}.` : '';
+  const role = getRole(req.user);
+
+  if (role === 'va') {
+    return {
+      clause: `${prefix}id IN (
+        SELECT CAST(resource_id AS INTEGER)
+        FROM user_permissions
+        WHERE user_id = ? AND resource_type = 'task'
+      )`,
+      params: [req.user.id],
+    };
+  }
+
   if (req.user.is_admin && req.query.scope === 'all') {
     return { clause: '1=1', params: [] };
   }
